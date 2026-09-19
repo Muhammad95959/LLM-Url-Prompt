@@ -27,6 +27,7 @@
     'kimi.com': {},
     'www.kimi.com': {},
     'kimi.ai': {},
+    'manus.im': {},
     'poe.com': {},
     'www.poe.com': {},
     'chat.z.ai': {},

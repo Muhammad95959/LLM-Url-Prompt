@@ -27,6 +27,7 @@ declare -A SITES=(
   [deepseek]="https://chat.deepseek.com/"
   [qwen]="https://chat.qwen.ai/"
   [kimi]="https://kimi.com/"
+  [manus]="https://manus.im/"
   [poe]="https://poe.com/"
   [zai]="https://chat.z.ai/"
   [pi]="https://pi.ai/"
