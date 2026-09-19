@@ -1,13 +1,39 @@
 {
   "manifest_version": 3,
-  "name": "Z.ai URL Prompt",
-  "version": "1.3",
-  "description": "Open chat.z.ai/?q=<prompt> to fill the prompt. Add &s to send automatically.",
+  "name": "LLM URL Prompt",
+  "version": "2.0",
+  "description": "Open any supported AI chat with ?prompt=<text> to fill the composer. Add &send to submit automatically.",
   "content_scripts": [
     {
-      "matches": ["https://chat.z.ai/*"],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://grok.com/*",
+        "https://perplexity.ai/*",
+        "https://www.perplexity.ai/*",
+        "https://meta.ai/*",
+        "https://www.meta.ai/*",
+        "https://chat.deepseek.com/*",
+        "https://chat.qwen.ai/*",
+        "https://kimi.com/*",
+        "https://www.kimi.com/*",
+        "https://kimi.ai/*",
+        "https://poe.com/*",
+        "https://www.poe.com/*",
+        "https://chat.z.ai/*",
+        "https://pi.ai/*",
+        "https://duck.ai/*",
+        "https://venice.ai/*",
+        "https://openrouter.ai/*",
+        "https://t3.chat/*",
+        "https://genspark.ai/*",
+        "https://www.genspark.ai/*"
+      ],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start",
+      "all_frames": true
     }
   ]
 }
