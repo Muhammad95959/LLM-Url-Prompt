@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Z.ai URL Prompt",
+  "version": "1.3",
+  "description": "Open chat.z.ai/?q=<prompt> to fill the prompt. Add &s to send automatically.",
+  "content_scripts": [
+    {
+      "matches": ["https://chat.z.ai/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
