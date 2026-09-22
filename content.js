@@ -14,22 +14,16 @@
   // match is broader than the actual chat page.
   const SITES = {
     'chatgpt.com': { composer: ['#prompt-textarea', 'main textarea', 'form textarea', 'textarea'] },
-    'chat.openai.com': { composer: ['#prompt-textarea', 'main textarea', 'form textarea', 'textarea'] },
     'claude.ai': { composer: ['div[contenteditable="true"]', '.ProseMirror', 'textarea'] },
     'gemini.google.com': { composer: ['div[contenteditable="true"]', 'rich-textarea', 'textarea'] },
     'grok.com': {},
     'perplexity.ai': { composer: ['#ask-input', 'div[contenteditable="true"]', 'textarea'] },
-    'www.perplexity.ai': { composer: ['#ask-input', 'div[contenteditable="true"]', 'textarea'] },
     'meta.ai': { composer: ['div[data-testid="composer-input"][contenteditable="true"]'] },
-    'www.meta.ai': { composer: ['div[data-testid="composer-input"][contenteditable="true"]'] },
     'chat.deepseek.com': {},
     'chat.qwen.ai': {},
     'kimi.com': {},
-    'www.kimi.com': {},
-    'kimi.ai': {},
     'manus.im': {},
     'poe.com': {},
-    'www.poe.com': {},
     'chat.z.ai': {},
     'pi.ai': {},
     'duck.ai': {},
@@ -37,7 +31,6 @@
     'openrouter.ai': { gate: '/chat' },
     't3.chat': {},
     'genspark.ai': {},
-    'www.genspark.ai': {},
   };
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
