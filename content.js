@@ -42,6 +42,8 @@
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+  const isGeminiHost = () => location.hostname === 'gemini.google.com';
+
   function isVisible(el) {
     return !!(el.offsetParent || el.getClientRects().length);
   }
@@ -84,7 +86,99 @@
 
   function currentValue(el) {
     if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) return el.value;
+    if (el.tagName && el.tagName.toLowerCase() === 'rich-textarea') {
+      const inner = el.querySelector('[contenteditable="true"]');
+      if (inner) return inner.textContent || '';
+    }
     return el.textContent || '';
+  }
+
+  function clearComposer(el) {
+    if (!el) return;
+    el.focus();
+    if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(el, ''); else el.value = '';
+      el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      const target = (el.tagName && el.tagName.toLowerCase() === 'rich-textarea')
+        ? (el.querySelector('[contenteditable="true"]') || el)
+        : el;
+      target.focus();
+      const sel = window.getSelection();
+      const range = document.createRange();
+      try {
+        range.selectNodeContents(target);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        const did = document.execCommand('insertText', false, '');
+        if (!did) {
+          target.textContent = '';
+          target.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        } else {
+          target.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        }
+        if ((target.textContent || '').trim()) {
+          target.textContent = '';
+          target.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        }
+        if (target.innerHTML === '<p><br></p>' || target.innerHTML === '<br>') target.innerHTML = '';
+      } catch (e) {
+        try { target.textContent = ''; target.dispatchEvent(new InputEvent('input', { bubbles: true })); } catch (e2) {}
+      }
+    }
+  }
+
+  function hasUrlChanged(startHref) {
+    try {
+      if (location.href !== startHref) return true;
+      const cur = new URL(location.href);
+      const start = new URL(startHref);
+      if (cur.pathname !== start.pathname) return true;
+      if (start.searchParams.has('prompt') && !cur.searchParams.has('prompt')) return true;
+    } catch (e) {}
+    return false;
+  }
+
+  function isComposerEmpty(el) {
+    if (!el) return true;
+    return !currentValue(el).trim();
+  }
+
+  function isSentinelSent(sentinel, selectors, startHref) {
+    if (hasUrlChanged(startHref)) return true;
+    if (!sentinel) return true;
+    if (isComposerEmpty(sentinel)) return true;
+    if (!document.contains(sentinel)) {
+      const cur = findInput(selectors);
+      if (!cur || isComposerEmpty(cur)) return true;
+    }
+    return false;
+  }
+
+  function schedulePostSendCleanup(prompt, selectors, startHref, sentinel, durationMs = 10000) {
+    const norm = prompt.trim();
+    if (!norm) return;
+    const start = Date.now();
+    let sentObserved = false;
+    const tick = () => {
+      if (Date.now() - start > durationMs) return;
+      const el = findInput(selectors);
+      if (!sentObserved) {
+        if (isSentinelSent(sentinel, selectors, startHref)) sentObserved = true;
+      }
+      if (sentObserved && el) {
+        const val = currentValue(el);
+        if (val.trim() === norm) {
+          console.info(LOG, 'Composer refilled with prompt — clearing.');
+          clearComposer(el);
+        }
+      }
+      if (Date.now() - start < durationMs) setTimeout(tick, 400);
+    };
+    setTimeout(tick, 300);
   }
 
   function fillInput(el, text) {
@@ -157,6 +251,7 @@
   // decide whether it's safe to strip the URL params.
   async function fillComposer(selectors, prompt, autoSend) {
     const deadline = Date.now() + 20000;
+    const startHref = location.href;
     while (Date.now() < deadline) {
       const el = findInput(selectors);
       if (el && currentValue(el) !== prompt) {
@@ -169,23 +264,47 @@
       }
       const ready = findInput(selectors);
       if (ready && currentValue(ready) === prompt) {
+        const sentinel = ready;
         if (!autoSend) {
           focusComposer(selectors);
           console.info(LOG, 'Prompt filled — press Enter when ready.');
           return true;
         }
         await sleep(400);
+        // Gemini-only: watch for refilled composer and use sentinel/URL checks
+        if (isGeminiHost()) schedulePostSendCleanup(prompt, selectors, startHref, sentinel);
         for (let attempt = 0; attempt < 4; attempt++) {
-          const cur = findInput(selectors);
-          if (!cur || !currentValue(cur).trim()) {
+          const sent = isGeminiHost()
+            ? isSentinelSent(sentinel, selectors, startHref)
+            : (!findInput(selectors) || !currentValue(findInput(selectors)).trim());
+          if (sent) {
             focusComposer(selectors);
             console.info(LOG, 'Prompt sent.');
             return true;
           }
+          const cur = findInput(selectors);
           const btn = findSendButton(cur);
           if (btn) btn.click();
           else if (cur) pressEnter(cur);
           await sleep(600);
+          const sentAfter = isGeminiHost()
+            ? isSentinelSent(sentinel, selectors, startHref)
+            : (!findInput(selectors) || !currentValue(findInput(selectors)).trim());
+          if (sentAfter) {
+            focusComposer(selectors);
+            console.info(LOG, 'Prompt sent.');
+            return true;
+          }
+        }
+        if (isGeminiHost()) {
+          for (let i = 0; i < 10; i++) {
+            if (isSentinelSent(sentinel, selectors, startHref)) {
+              focusComposer(selectors);
+              console.info(LOG, 'Prompt sent (late confirmation).');
+              return true;
+            }
+            await sleep(500);
+          }
         }
         // Filled but couldn't confirm the send went through. Leave the URL
         // params intact so a reload (or later SPA route change) can retry
@@ -201,14 +320,20 @@
   }
 
   let handledUrl = null; // last href we successfully completed for
+  let handledPrompt = null; // Gemini-only: last prompt stripped
+  let handledAt = 0;
   let inFlight = false;  // prevents overlapping fillComposer runs
 
   function stripParams() {
     try {
       const u = new URL(location.href);
+      if (!u.searchParams.has('prompt') && !u.searchParams.has('send')) return false;
       for (const p of ['prompt', 'send']) u.searchParams.delete(p);
       history.replaceState(null, '', u.pathname + u.search + u.hash);
+      if (isGeminiHost()) console.info(LOG, 'Stripped prompt params.');
+      return true;
     } catch (e) {}
+    return false;
   }
 
   function maybeRun() {
@@ -216,9 +341,37 @@
     const prompt = params.get('prompt');
     if (!prompt) return;
 
+    // Gemini-only: params reappear in new /app/<id>?prompt after send — strip without refill
+    if (isGeminiHost() && handledPrompt !== null && prompt === handledPrompt) {
+      const age = Date.now() - handledAt;
+      if (age < 60000) {
+        const didStrip = stripParams();
+        if (didStrip) {
+          try {
+            const cfg = siteConfig();
+            if (cfg) {
+              const el = findInput(cfg.composer);
+              if (el && currentValue(el).trim() === prompt.trim()) {
+                console.info(LOG, 'Clearing refilled prompt after param reappearance.');
+                clearComposer(el);
+              }
+            }
+          } catch (e) {}
+          handledUrl = location.href;
+          return;
+        }
+      }
+      if (age >= 60000) handledPrompt = null;
+    }
+
     const key = location.href;
     if (key === handledUrl) return; // already completed successfully for this exact URL
-    if (inFlight) return;           // a run is already in progress, let it finish or time out
+    if (inFlight) {
+      if (isGeminiHost()) {
+        setTimeout(maybeRun, 600);
+      }
+      return;
+    }
 
     // Check eligibility (e.g. gated path) BEFORE touching the URL at all —
     // if we're not going to act, the prompt param must survive so the user
@@ -237,9 +390,16 @@
       inFlight = false;
       if (success) {
         handledUrl = key;
-        // Only now, after the prompt has actually landed in the composer
-        // (and been sent, if requested), is it safe to drop it from the URL.
-        stripParams();
+        if (isGeminiHost()) {
+          handledPrompt = prompt;
+          handledAt = Date.now();
+          stripParams();
+          handledUrl = location.href;
+          setTimeout(maybeRun, 300);
+        } else {
+          // Non-Gemini: original simple strip
+          stripParams();
+        }
       }
       // On failure we deliberately leave the params in place so a page
       // reload or later route change can retry automatically.
