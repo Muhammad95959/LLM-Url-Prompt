@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Launches Brave (via --test-type, matching the reference command) at each
-# provider URL supported by the LLM URL Prompt extension, with ?prompt=hello.
+# Opens the system default browser at each provider URL supported by the LLM
+# URL Prompt extension, with ?prompt=hello.
+#
+# Uses xdg-open (Linux), open (macOS), or cmd.exe start (Windows) to respect
+# the OS default browser. Falls back to sensible-browser / python3 webbrowser.
 #
 # Usage:
 #   ./test-providers.sh              # menu: pick one site to test
@@ -12,8 +15,27 @@
 #
 # BROWSER can be overridden, e.g.: BROWSER=brave ./test-providers.sh
 
-BROWSER="${BROWSER:-brave-origin}"
 DELAY_BETWEEN="${DELAY_BETWEEN:-0.25}"
+
+open_url() {
+  local url="$1"
+  # Explicit BROWSER override still honored (keeps --test-type for Brave/Chromium).
+  if [[ -n "${BROWSER:-}" ]]; then
+    "$BROWSER" --test-type "$url" &
+    return
+  fi
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" &
+  elif command -v open >/dev/null 2>&1; then
+    open "$url" &
+  elif command -v cmd.exe >/dev/null 2>&1; then
+    cmd.exe /c start "" "$url" &
+  elif command -v sensible-browser >/dev/null 2>&1; then
+    sensible-browser "$url" &
+  else
+    python3 -m webbrowser "$url" &
+  fi
+}
 
 # name -> URL (gated sites point straight at the path the extension requires)
 declare -A SITES=(
@@ -48,7 +70,7 @@ launch() {
   local base="${SITES[$name]}"
   local url="${base}?prompt=hello${SEND}"
   echo "-> [$name] $url"
-  "$BROWSER" --test-type "$url" &
+  open_url "$url"
 }
 
 case "$1" in
