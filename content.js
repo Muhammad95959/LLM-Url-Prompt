@@ -28,7 +28,7 @@
     'meta.ai': { composer: ['div[data-testid="composer-input"][contenteditable="true"]'] },
     'chat.deepseek.com': {},
     'chat.qwen.ai': {},
-    'kimi.com': {},
+    'www.kimi.ai': {},
     'manus.im': {},
     'poe.com': {},
     'chat.z.ai': {},
