@@ -10,7 +10,7 @@
         "https://claude.ai/*",
         "https://gemini.google.com/*",
         "https://grok.com/*",
-        "https://perplexity.ai/*",
+        "https://www.perplexity.ai/*",
         "https://meta.ai/*",
         "https://chat.deepseek.com/*",
         "https://chat.qwen.ai/*",
@@ -23,7 +23,7 @@
         "https://venice.ai/*",
         "https://openrouter.ai/*",
         "https://t3.chat/*",
-        "https://genspark.ai/*"
+        "https://www.genspark.ai/*"
       ],
       "js": ["content.js"],
       "run_at": "document_start",

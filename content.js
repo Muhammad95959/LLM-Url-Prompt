@@ -24,7 +24,15 @@
       'div[contenteditable="true"]', 'rich-textarea', 'textarea'
     ] },
     'grok.com': {},
-    'perplexity.ai': { composer: ['#ask-input', 'div[contenteditable="true"]', 'textarea'] },
+    'www.perplexity.ai': { composer: [
+      '#ask-input',
+      'div[contenteditable="true"][data-lexical-editor="true"]',
+      '#root [contenteditable="true"]',
+      '#root textarea',
+      'div[contenteditable="true"][role="textbox"]',
+      'div[contenteditable="true"]',
+      'textarea'
+    ] },
     'meta.ai': { composer: ['div[data-testid="composer-input"][contenteditable="true"]'] },
     'chat.deepseek.com': {},
     'chat.qwen.ai': {},
@@ -37,19 +45,34 @@
     'venice.ai': {},
     'openrouter.ai': { gate: '/chat' },
     't3.chat': {},
-    'genspark.ai': {},
+    'www.genspark.ai': { composer: [
+      'div.textarea-wrapper textarea',
+      '.search-input-and-toggle textarea',
+      'div.textarea-wrapper [contenteditable="true"]',
+      '#__nuxt textarea',
+      'textarea'
+    ] },
   };
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const isGeminiHost = () => location.hostname === 'gemini.google.com';
+  const isGensparkHost = () => /(^|\.)genspark\.ai$/.test(location.hostname);
+  const isPerplexityHost = () => /(^|\.)perplexity\.ai$/.test(location.hostname);
 
   function isVisible(el) {
     return !!(el.offsetParent || el.getClientRects().length);
   }
 
   function siteConfig() {
-    const cfg = SITES[location.hostname];
+    let cfg = SITES[location.hostname];
+    // handle www. alias without duplicating logic everywhere
+    if (!cfg && location.hostname.startsWith('www.')) cfg = SITES[location.hostname.slice(4)];
+    if (!cfg) {
+      // also check base host for subdomains
+      const base = location.hostname.replace(/^www\./, '');
+      cfg = SITES[base];
+    }
     if (!cfg) return { composer: DEFAULT_COMPOSER };
     if (cfg.gate && !location.pathname.startsWith(cfg.gate)) return null;
     return { composer: [...(cfg.composer || []), ...DEFAULT_COMPOSER] };
@@ -68,16 +91,23 @@
   // are almost always docked near the bottom of the viewport (unlike search
   // bars, filters, or newsletter inputs higher up the page), so pick the
   // largest visible textarea/contenteditable box closest to the bottom.
+  // Genspark & Perplexity home pages center the composer, so bias toward
+  // center/large area for those hosts.
   function findComposerFallback() {
     const candidates = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')]
       .filter(isVisible);
     if (!candidates.length) return null;
+    const isCenteredHost = isGensparkHost() || isPerplexityHost();
     const scored = candidates.map(el => {
       const r = el.getBoundingClientRect();
-      const distanceFromBottom = window.innerHeight - r.bottom;
       const area = r.width * r.height;
-      // Prefer elements nearer the bottom; use area as a tiebreaker so a
-      // large empty page isn't beaten by a tiny hidden textarea.
+      if (isCenteredHost) {
+        const centerY = window.innerHeight / 2;
+        const elCenterY = r.top + r.height / 2;
+        const distanceFromCenter = Math.abs(centerY - elCenterY);
+        return { el, score: -distanceFromCenter * 0.5 + Math.log(area + 1) * 2 };
+      }
+      const distanceFromBottom = window.innerHeight - r.bottom;
       return { el, score: -distanceFromBottom + Math.log(area + 1) };
     });
     scored.sort((a, b) => b.score - a.score);
@@ -158,11 +188,58 @@
     return txt === norm || txt.includes(norm);
   }
 
+  function isGensparkMessageSent(prompt) {
+    const norm = prompt.trim();
+    if (!norm) return false;
+    // Provided by user: #__nuxt ... div.conversation-statement.user.plain-text > div.conversation-item-desc.user > div
+    const candidates = [
+      ...document.querySelectorAll('div.conversation-statement.user.plain-text'),
+      ...document.querySelectorAll('div.conversation-item-desc.user'),
+      ...document.querySelectorAll('[data-testid="user-message"]'),
+    ];
+    for (const el of candidates) {
+      const txt = (el.textContent || '').trim();
+      if (txt && (txt === norm || txt.includes(norm))) return true;
+    }
+    return false;
+  }
+
+  function isPerplexityMessageSent(prompt) {
+    const norm = prompt.trim();
+    if (!norm) return false;
+    // Perplexity thread: #root ... .group/thread-content ... inline-flex containing user query
+    // Use broad selectors - user bubble is the only inline-flex ending with query text
+    const candidates = [
+      ...document.querySelectorAll('#root .group\\/thread-content span'),
+      ...document.querySelectorAll('#root [data-testid="user-message"]'),
+      ...document.querySelectorAll('#root .conversation-statement.user'),
+      ...document.querySelectorAll('#root div.inline-flex span span'),
+    ];
+    for (const el of candidates) {
+      const txt = (el.textContent || '').trim();
+      if (txt && (txt === norm || txt.includes(norm))) return true;
+    }
+    // Fallback: any span in thread that matches prompt
+    const allSpans = [...document.querySelectorAll('#root span')].filter(isVisible);
+    for (const el of allSpans) {
+      const txt = (el.textContent || '').trim();
+      if (txt === norm) return true;
+    }
+    return false;
+  }
+
+  function isPromptSent(prompt) {
+    if (isGeminiHost() && isGeminiMessageSent(prompt)) return true;
+    if (isGensparkHost() && isGensparkMessageSent(prompt)) return true;
+    if (isPerplexityHost() && isPerplexityMessageSent(prompt)) return true;
+    return false;
+  }
+
   function isSentinelSent(sentinel, selectors, startHref, prompt) {
     if (hasUrlChanged(startHref)) return true;
     if (!sentinel) return true;
     if (isComposerEmpty(sentinel)) return true;
-    if (isGeminiHost() && prompt && isGeminiMessageSent(prompt)) return true;
+    if (prompt && isPromptSent(prompt)) return true;
     if (!document.contains(sentinel)) {
       const cur = findInput(selectors);
       if (!cur || isComposerEmpty(cur)) return true;
@@ -201,13 +278,34 @@
       if (desc && desc.set) desc.set.call(el, text); else el.value = text;
       el.dispatchEvent(new InputEvent('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
+      // Frameworks (Vue/Nuxt - Genspark, React - Perplexity) sometimes need
+      // native setter + input + additional events
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
     } else {
+      const target = el;
+      target.focus();
       const sel = window.getSelection();
       const range = document.createRange();
-      range.selectNodeContents(el);
-      sel.removeAllRanges();
-      sel.addRange(range);
-      document.execCommand('insertText', false, text);
+      try {
+        range.selectNodeContents(target);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch (e) {}
+      // Lexical (Perplexity) and generic contenteditable
+      let did = false;
+      try { did = document.execCommand('insertText', false, text); } catch (e) {}
+      if (!did) {
+        target.textContent = text;
+      }
+      target.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      target.dispatchEvent(new InputEvent('beforeinput', { bubbles: true }));
+      // ensure framework sees change
+      if ((target.textContent || '').trim() !== text.trim()) {
+        target.textContent = text;
+        target.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      }
     }
   }
 
@@ -237,15 +335,42 @@
   function findSendButton(input) {
     const enabled = [...document.querySelectorAll('button:not([disabled])')]
       .filter(b => b.getAttribute('aria-disabled') !== 'true' && isVisible(b));
+    // Scope to composer vicinity first for Genspark/Perplexity where many buttons exist
+    if (input) {
+      const scope = input.closest('form') || input.closest('div.textarea-wrapper') || input.closest('.search-input-and-toggle') || input.parentElement;
+      if (scope) {
+        const scoped = [...scope.querySelectorAll('button:not([disabled])')].filter(isVisible);
+        const scopedByLabel = scoped.find(b =>
+          /send|submit|ask/i.test(b.getAttribute('aria-label') || '') ||
+          /send|submit/i.test(b.dataset.testid || '') ||
+          /send|submit/i.test(b.getAttribute('data-testid') || '')
+        );
+        if (scopedByLabel) return scopedByLabel;
+        // Genspark has button near textarea with send icon; Perplexity has submit button
+        if (scoped.length === 1) return scoped[0];
+        const withSvg = scoped.find(b => b.querySelector('svg'));
+        if (withSvg) return withSvg;
+      }
+    }
     const byLabel = enabled.find(b =>
       /send|submit/i.test(b.getAttribute('aria-label') || '') ||
-      /send/i.test(b.dataset.testid || '')
+      /send/i.test(b.dataset.testid || '') ||
+      /send/i.test(b.getAttribute('data-testid') || '')
     );
     if (byLabel) return byLabel;
     const form = input && input.closest('form');
     if (form) {
       const sub = form.querySelector('button[type="submit"]:not([disabled])');
       if (sub && isVisible(sub)) return sub;
+    }
+    // Last resort: button with send icon near input
+    if (input) {
+      const near = enabled.filter(b => {
+        const r = b.getBoundingClientRect();
+        const ir = input.getBoundingClientRect();
+        return Math.abs(r.top - ir.top) < 200 && Math.abs(r.left - ir.left) < 600;
+      });
+      if (near.length) return near[0];
     }
     return null;
   }
@@ -283,13 +408,10 @@
           return true;
         }
         await sleep(400);
-        // Gemini-only: watch for refilled composer and use sentinel/URL checks
-        if (isGeminiHost()) schedulePostSendCleanup(prompt, selectors, startHref, sentinel);
+        // watch for refilled composer and use sentinel/URL/message checks
+        schedulePostSendCleanup(prompt, selectors, startHref, sentinel);
         for (let attempt = 0; attempt < 4; attempt++) {
-          const sent = isGeminiHost()
-            ? isSentinelSent(sentinel, selectors, startHref, prompt)
-            : (!findInput(selectors) || !currentValue(findInput(selectors)).trim());
-          if (sent) {
+          if (isSentinelSent(sentinel, selectors, startHref, prompt)) {
             focusComposer(selectors);
             console.info(LOG, 'Prompt sent.');
             return true;
@@ -297,26 +419,27 @@
           const cur = findInput(selectors);
           const btn = findSendButton(cur);
           if (btn) btn.click();
-          else if (cur) pressEnter(cur);
+          else if (cur) {
+            cur.focus();
+            // Genspark/Perplexity may need Enter with modifier or just Enter
+            pressEnter(cur);
+            // Fallback: dispatch Enter on document as well
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+          }
           await sleep(600);
-          const sentAfter = isGeminiHost()
-            ? isSentinelSent(sentinel, selectors, startHref, prompt)
-            : (!findInput(selectors) || !currentValue(findInput(selectors)).trim());
-          if (sentAfter) {
+          if (isSentinelSent(sentinel, selectors, startHref, prompt)) {
             focusComposer(selectors);
             console.info(LOG, 'Prompt sent.');
             return true;
           }
         }
-        if (isGeminiHost()) {
-          for (let i = 0; i < 10; i++) {
-            if (isSentinelSent(sentinel, selectors, startHref, prompt)) {
-              focusComposer(selectors);
-              console.info(LOG, 'Prompt sent (late confirmation).');
-              return true;
-            }
-            await sleep(500);
+        for (let i = 0; i < 10; i++) {
+          if (isSentinelSent(sentinel, selectors, startHref, prompt)) {
+            focusComposer(selectors);
+            console.info(LOG, 'Prompt sent (late confirmation).');
+            return true;
           }
+          await sleep(500);
         }
         // Filled but couldn't confirm the send went through. Leave the URL
         // params intact so a reload (or later SPA route change) can retry
