@@ -15,7 +15,14 @@
   const SITES = {
     'chatgpt.com': { composer: ['#prompt-textarea', 'main textarea', 'form textarea', 'textarea'] },
     'claude.ai': { composer: ['div[contenteditable="true"]', '.ProseMirror', 'textarea'] },
-    'gemini.google.com': { composer: ['div[contenteditable="true"]', 'rich-textarea', 'textarea'] },
+    'gemini.google.com': { composer: [
+      'input-area-v2 div.single-line-format > div',
+      'input-area-v2 div[class*="single-line-format"] > div',
+      'input-area-v2 [contenteditable="true"]',
+      'chat-window input-area-v2 [contenteditable="true"]',
+      '#xap-skip-link-target chat-window input-area-v2 div.single-line-format > div',
+      'div[contenteditable="true"]', 'rich-textarea', 'textarea'
+    ] },
     'grok.com': {},
     'perplexity.ai': { composer: ['#ask-input', 'div[contenteditable="true"]', 'textarea'] },
     'meta.ai': { composer: ['div[data-testid="composer-input"][contenteditable="true"]'] },
@@ -140,10 +147,22 @@
     return !currentValue(el).trim();
   }
 
-  function isSentinelSent(sentinel, selectors, startHref) {
+  function isGeminiMessageSent(prompt) {
+    const norm = prompt.trim();
+    if (!norm) return false;
+    const el = document.querySelector('[id^="user-query-content-"] > span')
+            || document.querySelector('#user-query-content-0 > span')
+            || document.querySelector('[id^="user-query-content-"]');
+    if (!el) return false;
+    const txt = (el.textContent || '').trim();
+    return txt === norm || txt.includes(norm);
+  }
+
+  function isSentinelSent(sentinel, selectors, startHref, prompt) {
     if (hasUrlChanged(startHref)) return true;
     if (!sentinel) return true;
     if (isComposerEmpty(sentinel)) return true;
+    if (isGeminiHost() && prompt && isGeminiMessageSent(prompt)) return true;
     if (!document.contains(sentinel)) {
       const cur = findInput(selectors);
       if (!cur || isComposerEmpty(cur)) return true;
@@ -160,7 +179,7 @@
       if (Date.now() - start > durationMs) return;
       const el = findInput(selectors);
       if (!sentObserved) {
-        if (isSentinelSent(sentinel, selectors, startHref)) sentObserved = true;
+        if (isSentinelSent(sentinel, selectors, startHref, prompt)) sentObserved = true;
       }
       if (sentObserved && el) {
         const val = currentValue(el);
@@ -268,7 +287,7 @@
         if (isGeminiHost()) schedulePostSendCleanup(prompt, selectors, startHref, sentinel);
         for (let attempt = 0; attempt < 4; attempt++) {
           const sent = isGeminiHost()
-            ? isSentinelSent(sentinel, selectors, startHref)
+            ? isSentinelSent(sentinel, selectors, startHref, prompt)
             : (!findInput(selectors) || !currentValue(findInput(selectors)).trim());
           if (sent) {
             focusComposer(selectors);
@@ -281,7 +300,7 @@
           else if (cur) pressEnter(cur);
           await sleep(600);
           const sentAfter = isGeminiHost()
-            ? isSentinelSent(sentinel, selectors, startHref)
+            ? isSentinelSent(sentinel, selectors, startHref, prompt)
             : (!findInput(selectors) || !currentValue(findInput(selectors)).trim());
           if (sentAfter) {
             focusComposer(selectors);
@@ -291,7 +310,7 @@
         }
         if (isGeminiHost()) {
           for (let i = 0; i < 10; i++) {
-            if (isSentinelSent(sentinel, selectors, startHref)) {
+            if (isSentinelSent(sentinel, selectors, startHref, prompt)) {
               focusComposer(selectors);
               console.info(LOG, 'Prompt sent (late confirmation).');
               return true;
