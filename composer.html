@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM URL Prompt</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #16181d;
+    --muted: #6b7280;
+    --line: #d8dbe0;
+    --field: #ffffff;
+    --accent: #2f6feb;
+    --accent-fg: #ffffff;
+    --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181d;
+      --fg: #e6e8ec;
+      --muted: #9aa2af;
+      --line: #333944;
+      --field: #1e222a;
+      --accent: #5b8dff;
+      --accent-fg: #0d1017;
+      --chip: #232833;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1.25rem 3rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 1.5rem; font-size: .9rem; }
+  .field { margin-bottom: 1.1rem; }
+  label.lab {
+    display: block;
+    font-size: .78rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: .4rem;
+  }
+  select, textarea, input[type="text"] {
+    width: 100%;
+    padding: .6rem .7rem;
+    font-size: .95rem;
+    color: var(--fg);
+    background: var(--field);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  select:focus, textarea:focus, input:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+  /* Monospace so pasted code keeps the shape you gave it. */
+  textarea {
+    font: 13px/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    resize: vertical;
+    min-height: 15rem;
+    tab-size: 4;
+    white-space: pre;
+    overflow-wrap: normal;
+    overflow-x: auto;
+  }
+  .opts { display: flex; flex-wrap: wrap; gap: 1.1rem; margin: .7rem 0 0; }
+  .opt { display: flex; align-items: center; gap: .4rem; font-size: .88rem; color: var(--fg); }
+  .opt input { accent-color: var(--accent); }
+  .hint { color: var(--muted); font-size: .82rem; margin-top: .45rem; }
+  .hint b { color: var(--fg); font-weight: 600; }
+  .urlrow { display: flex; gap: .5rem; }
+  .urlrow input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
+  .actions { display: flex; align-items: center; gap: .75rem; margin-top: 1.25rem; }
+  button {
+    font: inherit;
+    padding: .55rem 1.1rem;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--chip);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  #status { color: var(--muted); font-size: .85rem; }
+  kbd {
+    font: 12px ui-monospace, Menlo, Consolas, monospace;
+    background: var(--chip);
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: .1rem .3rem;
+  }
+  details { margin-top: 2rem; color: var(--muted); font-size: .87rem; }
+  details summary { cursor: pointer; }
+  details ul { margin: .6rem 0 0; padding-left: 1.2rem; }
+  details li { margin-bottom: .3rem; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .85em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LLM URL Prompt</h1>
+  <p class="sub">Paste your prompt exactly as you want it delivered &mdash; line breaks and indentation included.</p>
+
+  <div class="field">
+    <label class="lab" for="site">Provider</label>
+    <select id="site"></select>
+  </div>
+
+  <div class="field">
+    <label class="lab" for="prompt">Prompt</label>
+    <textarea id="prompt" spellcheck="false" placeholder="Review this function:&#10;&#10;def parse(raw):&#10;    total = 0&#10;    for line in raw:&#10;        total += int(line)&#10;    return total&#10;&#10;What breaks if raw is empty?"></textarea>
+    <div class="opts">
+      <label class="opt"><input type="checkbox" id="autoSend"> Send automatically</label>
+      <label class="opt"><input type="checkbox" id="readable" checked> Readable URL (<code>%20</code> not <code>+</code>)</label>
+      <label class="opt" title="Logs what the site actually received, to diagnose line breaks being squashed"><input type="checkbox" id="debug"> Debug</label>
+    </div>
+    <p class="hint" id="stats">&nbsp;</p>
+  </div>
+
+  <div class="field">
+    <label class="lab" for="url">Resulting link</label>
+    <div class="urlrow">
+      <input type="text" id="url" readonly>
+      <button id="copy" type="button">Copy</button>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="open" type="button" class="primary">Open chat</button>
+    <span id="status"></span>
+  </div>
+
+  <details>
+    <summary>Why not just paste into the address bar?</summary>
+    <ul>
+      <li>A URL cannot legally contain a line break, so browsers flatten one you
+          type or paste into the address bar into a space before the page is
+          even loaded. The line breaks are gone before the extension runs.</li>
+      <li>This page encodes the prompt for you, so
+          <code>%0A</code> and <code>%2B</code> are handled correctly.</li>
+      <li>Building a link by hand still works &mdash; just encode line breaks as
+          <code>%0A</code> and any literal <code>+</code> as <code>%2B</code>.</li>
+      <li>If a prompt still arrives on one line, tick <b>Debug</b> above. The
+          console then logs the composer's rendered HTML, which shows whether
+          the site or its editor is folding the line breaks.</li>
+    </ul>
+  </details>
+</main>
+
+<script src="sites.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const site = $('site');
+  const prompt = $('prompt');
+  const autoSend = $('autoSend');
+  const readable = $('readable');
+  const debug = $('debug');
+  const urlBox = $('url');
+  const openBtn = $('open');
+  const copyBtn = $('copy');
+  const stats = $('stats');
+  const status = $('status');
+
+  const entries = Object.entries(globalThis.LLM_SITES || {});
+  if (!entries.length) {
+    status.textContent = 'sites.js failed to load.';
+    openBtn.disabled = copyBtn.disabled = true;
+    return;
+  }
+
+  // Alphabetical by display name so the list stays predictable as it grows.
+  entries.sort((a, b) => a[1].label.localeCompare(b[1].label));
+  for (const [host, cfg] of entries) {
+    const opt = document.createElement('option');
+    opt.value = host;
+    opt.textContent = cfg.label;
+    site.appendChild(opt);
+  }
+  site.value = localStorage.getItem('llmurl.site')
+    || (entries.find(([, c]) => c.label === 'ChatGPT') ? 'chatgpt.com' : entries[0][0]);
+
+  function flash(msg) {
+    status.textContent = msg;
+    setTimeout(() => { if (status.textContent === msg) status.textContent = ''; }, 2200);
+  }
+
+  function buildUrl() {
+    const cfg = globalThis.LLM_SITES[site.value];
+    const u = new URL(cfg.base);
+    u.searchParams.set('prompt', prompt.value);
+    if (autoSend.checked) u.searchParams.set('send', '1');
+    if (debug.checked) u.searchParams.set('debug', '1');
+    // searchParams encodes spaces as '+'; swap for %20 when readability wins.
+    return readable.checked ? u.toString().replace(/\+/g, '%20') : u.toString();
+  }
+
+  function render() {
+    localStorage.setItem('llmurl.site', site.value);
+    const text = prompt.value;
+    const lines = text === '' ? 0 : text.split('\n').length;
+    const indented = /^[ \t]/m.test(text);
+    const hasCode = /```/.test(text);
+
+    urlBox.value = buildUrl();
+    openBtn.disabled = copyBtn.disabled = text.trim() === '';
+
+    const bits = [];
+    if (lines > 1) bits.push(`<b>${lines}</b> lines preserved`);
+    if (indented) bits.push('indentation preserved');
+    if (hasCode) bits.push('code fence detected');
+    if (text && !autoSend.checked) bits.push('will only fill, not send');
+    if (debug.checked) bits.push('debug logging on &mdash; check the console');
+    stats.innerHTML = bits.length ? bits.join(' &middot; ') : '&nbsp;';
+  }
+
+  function open() {
+    if (!prompt.value.trim()) return;
+    location.href = buildUrl();
+  }
+
+  site.addEventListener('change', render);
+  prompt.addEventListener('input', render);
+  autoSend.addEventListener('change', render);
+  readable.addEventListener('change', render);
+  debug.addEventListener('change', render);
+  openBtn.addEventListener('click', open);
+
+  copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(urlBox.value);
+      flash('Link copied.');
+    } catch (e) {
+      urlBox.select();
+      flash('Press ' + (navigator.platform.includes('Mac') ? '⌘C' : 'Ctrl+C') + ' to copy.');
+    }
+  });
+
+  prompt.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); open(); }
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

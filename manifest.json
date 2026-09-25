@@ -1,8 +1,12 @@
 {
   "manifest_version": 3,
   "name": "LLM URL Prompt",
-  "version": "2.0",
+  "version": "2.1",
   "description": "Open any supported AI chat with ?prompt=<text> to fill the composer. Add &send to submit automatically.",
+  "action": {},
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [
@@ -10,10 +14,12 @@
         "https://claude.ai/*",
         "https://gemini.google.com/*",
         "https://grok.com/*",
+        "https://perplexity.ai/*",
         "https://www.perplexity.ai/*",
         "https://meta.ai/*",
         "https://chat.deepseek.com/*",
         "https://chat.qwen.ai/*",
+        "https://kimi.ai/*",
         "https://www.kimi.ai/*",
         "https://manus.im/*",
         "https://poe.com/*",
@@ -23,9 +29,10 @@
         "https://venice.ai/*",
         "https://openrouter.ai/*",
         "https://t3.chat/*",
+        "https://genspark.ai/*",
         "https://www.genspark.ai/*"
       ],
-      "js": ["content.js"],
+      "js": ["sites.js", "content.js"],
       "run_at": "document_start",
       "all_frames": true
     }
