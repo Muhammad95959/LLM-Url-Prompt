@@ -267,6 +267,43 @@
   // fillComposer can report it once instead of on every retry.
   let fillDrift = null;
   let fillStrategy = null;
+  // Last non-empty rendering seen during a fill. The composer is left clean on
+  // failure, so this is the only record of what the site actually produced.
+  let fillObserved = null;
+
+  function composerText(el) {
+    const t = editableTarget(el);
+    if (!t) return '';
+    if (t instanceof HTMLTextAreaElement || t instanceof HTMLInputElement) return t.value || '';
+    return t.isContentEditable ? readEditable(t) : (t.textContent || '');
+  }
+
+  function emptyComposer(el) {
+    return !normalize(composerText(el));
+  }
+
+  // Clears the composer and confirms it is actually empty. A synthetic range
+  // is not enough on its own: editors that manage their own selection discard
+  // it, so a later insert appends and the user ends up with their prompt
+  // twice. Nothing may be written until this reports success.
+  function clearVerified(el) {
+    const target = editableTarget(el);
+    if (!target) return true;
+    for (let i = 0; i < 3 && !emptyComposer(target); i++) {
+      target.focus();
+      if (i === 0) selectAllContents(target);
+      else { try { document.execCommand('selectAll', false); } catch (e) {} }
+      try { document.execCommand('delete', false); } catch (e) {}
+      if (emptyComposer(target)) {
+        target.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        return true;
+      }
+    }
+    if (isRichEditor(target)) return emptyComposer(target);
+    try { target.textContent = ''; } catch (e) { return false; }
+    target.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    return emptyComposer(target);
+  }
 
   function setEditableText(el, text) {
     const target = editableTarget(el);
@@ -278,16 +315,14 @@
     // did not land the text exactly, so a framework that ignores one path
     // still gets served.
     const strategies = [
-      ['paste', () => { selectAllContents(target); return pasteText(target, text); }],
+      ['paste', () => pasteText(target, text)],
       ['bulk insertText', () => {
-        selectAllContents(target);
         let did = false;
         try { did = document.execCommand('insertText', false, text); } catch (e) {}
         return did;
       }],
-      ['per-line insertText', () => { selectAllContents(target); return typeLines(target, text); }],
+      ['per-line insertText', () => typeLines(target, text)],
       ['beforeinput', () => {
-        selectAllContents(target);
         try {
           const dt = new DataTransfer();
           dt.setData('text/plain', text);
@@ -299,10 +334,24 @@
       }],
     ];
 
-    for (const [name, strategy] of strategies) {
+    // Every attempt starts from a verified-empty composer and leaves nothing
+    // behind, so a failed attempt can never compound into duplicated text.
+    const attempt = (name, run) => {
       if (strict()) return true;
-      strategy();
+      if (!emptyComposer(target) && !clearVerified(target)) return false;
+      selectAllContents(target);
+      run();
       if (strict()) { fillStrategy = name; fillDrift = null; return true; }
+      const after = readEditable(target);
+      if (normalize(after)) fillObserved = { text: after, html: target.innerHTML };
+      if (!emptyComposer(target)) clearVerified(target);
+      return false;
+    };
+
+    let last = strategies[0][0];
+    for (const [name, run] of strategies) {
+      last = name;
+      if (attempt(name, run)) return true;
     }
 
     if (lenient()) {
@@ -311,7 +360,7 @@
       const got = codeLines(readEditable(target));
       // The rendered HTML is the only way to tell "site folded the newlines"
       // apart from "editor stored them but displays them as spaces".
-      fillDrift = `Text not delivered as typed (strategy: ${name}). `
+      fillDrift = `Text not delivered as typed (strategy: ${last}). `
         + (got.length < want.length
           ? `Site collapsed ${want.length} lines into ${got.length}. `
           : 'Indentation was altered. ')
@@ -322,6 +371,7 @@
     // Raw DOM writes desync the editor's document model, so they are a last
     // resort and never allowed on a rich editor.
     if (isRichEditor(target)) return false;
+    if (!emptyComposer(target) && !clearVerified(target)) return false;
     try { target.textContent = text; } catch (e) { return false; }
     target.dispatchEvent(new InputEvent('input', { bubbles: true }));
     fillStrategy = 'textContent';
@@ -332,21 +382,6 @@
   function truncate(s, n) {
     const str = String(s == null ? '' : s).replace(/\s+/g, ' ');
     return str.length > n ? `${str.slice(0, n)}…` : str;
-  }
-
-  function clearEditable(el) {
-    const target = editableTarget(el);
-    target.focus();
-    let ok = false;
-    try {
-      selectAllContents(target);
-      ok = document.execCommand('delete', false);
-    } catch (e) {}
-    if (!ok || normalize(readEditable(target))) {
-      if (isRichEditor(target)) return;
-      try { target.textContent = ''; } catch (e) { return; }
-    }
-    target.dispatchEvent(new InputEvent('input', { bubbles: true }));
   }
 
   function clearComposer(el) {
@@ -360,10 +395,7 @@
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return;
     }
-    if (el.isContentEditable || editableTarget(el) !== el) { clearEditable(el); return; }
-    el.focus();
-    try { el.textContent = ''; } catch (e) {}
-    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    if (!clearVerified(el)) console.warn(LOG, 'Could not clear the composer.');
   }
 
   function hasUrlChanged(startHref) {
@@ -596,6 +628,7 @@
     let sentinel = null;
     fillDrift = null;
     fillStrategy = null;
+    fillObserved = null;
 
     // Deliberately lenient: a site that always reindents would otherwise spin
     // here for the full deadline. The exact-match check lives in setEditableText
@@ -611,14 +644,16 @@
         if (fillInput(el, prompt) === false && isRichEditor(editableTarget(el))) refused++;
         else if (sameText(currentValue(el), norm)) refused = 0;
         if (refused >= 4) {
-          const got = readEditable(el);
+          // The composer is empty here by design; report what the site last
+          // produced so the cause is still visible.
+          const seen = fillObserved || { text: '', html: '' };
           console.warn(LOG,
             `The editor rewrote the prompt and would not accept it verbatim `
             + `(${refused} attempts).\n`
-            + `lines wanted: ${codeLines(prompt).length} | got: ${codeLines(got).length}\n`
-            + `Rendered: ${truncate(el.innerHTML, 220)}\n`
-            + 'Your prompt is still in the URL — nothing was sent. Reopen with '
-            + '&debug=1 for the full dump.');
+            + `lines wanted: ${codeLines(prompt).length} | got: ${codeLines(seen.text).length}\n`
+            + `Rendered: ${truncate(seen.html || el.innerHTML, 220)}\n`
+            + 'The composer was left empty so nothing mangled can be sent. Your '
+            + 'prompt is still in the URL. Reopen with &debug=1 for the full dump.');
           return false;
         }
         await sleep(250);

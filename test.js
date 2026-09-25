@@ -248,7 +248,8 @@ const win = {
  *  - paste splits on \n into blocks (unless the site ignores synthetic paste)
  */
 function makeEditor(d, { id, className = 'ProseMirror', ignorePaste = false,
-                        foldBulk = false, foldNewlines = false } = {}) {
+                        foldBulk = false, foldNewlines = false,
+                        ignoreSelectAll = false, manglePaste = false } = {}) {
   const el = bind(new El('div'), d);
   el.setAttribute('contenteditable', 'true');
   if (id) el.id = id;
@@ -329,6 +330,7 @@ function makeEditor(d, { id, className = 'ProseMirror', ignorePaste = false,
       return true;
     },
     get lines() { return lines; },
+    ignoreSelectAll,
   };
 
   // ChatGPT and Claude submit on Enter, so a real keydown here must never be
@@ -339,7 +341,7 @@ function makeEditor(d, { id, className = 'ProseMirror', ignorePaste = false,
   el.addEventListener('paste', ev => {
     if (ignorePaste) return;
     const text = (ev.clipboardData && ev.clipboardData.getData('text/plain')) || '';
-    const parts = text.split('\n');
+    const parts = (manglePaste ? text.replace(/^(    )+/gm, '  ') : text).split('\n');
     lines = parts;
     li = lines.length - 1;
     col = lines[li].length;
@@ -375,7 +377,9 @@ function buildSite(d, { hostname, search, editor, onSend }) {
   selection.addRange = r => {
     selection.ranges = [r];
     const el = r && r.el;
-    if (el && el._editor) el._selAll = true;
+    // ignoreSelectAll models an editor that discards synthetic ranges and
+    // keeps its own caret, so a later insert appends instead of replacing.
+    if (el && el._editor && !el._editor.ignoreSelectAll) el._selAll = true;
   };
 
   const sendBtn = bind(new El('button'), d);
@@ -548,6 +552,40 @@ async function main() {
       !run.infos.join('\n').includes('Prompt sent'), `infos = ${JSON.stringify(run.infos)}`);
     check('a folding site keeps the prompt in the URL',
       !!run.loc.search.includes('prompt='), `search = ${run.loc.search}`);
+  }
+
+  // ---- 4b. Claude's failure mode: the editor discards the synthetic range,
+  //           so a retry used to append and the prompt arrived duplicated.
+  {
+    const code = 'def f():\n    if x:\n        return 1\n    return 0';
+    const run = runContent({
+      hostname: 'claude.ai',
+      search: `?prompt=${encodeURIComponent(code)}`,
+      makeEditor: d => makeEditor(d, {
+        id: 'composer', className: 'ProseMirror', ignoreSelectAll: true, manglePaste: true,
+      }),
+    });
+    await settle(2500);
+    const got = run.editor._editor.lines;
+    check('no duplicated lines when selection is ignored', same(got, code.split('\n')),
+      `got ${JSON.stringify(got)}`);
+    check('the prompt is not sent twice over',
+      got.join('\n').split('def f():').length - 1 === 1,
+      `occurrences of "def f():" = ${got.join('\n').split('def f():').length - 1}`);
+  }
+
+  // ---- 4c. the same, on a site where the paste path is ignored outright
+  {
+    const code = 'alpha\n    beta\n        gamma';
+    const run = runContent({
+      hostname: 'claude.ai',
+      search: `?prompt=${encodeURIComponent(code)}`,
+      makeEditor: d => makeEditor(d, { id: 'composer', ignoreSelectAll: true, ignorePaste: true }),
+    });
+    await settle(2500);
+    check('no duplication on a single-line prompt either',
+      same(run.editor._editor.lines, code.split('\n')),
+      `got ${JSON.stringify(run.editor._editor.lines)}`);
   }
 
   // ---- 5. single-line prompt unchanged (no regression)
@@ -734,7 +772,7 @@ async function main() {
     check('drift report includes the rendered HTML',
       /target\.innerHTML/.test(setEditable), 'no innerHTML in the drift report');
     check('drift report names the strategy that ran',
-      /strategy: \$\{name\}/.test(setEditable));
+      /strategy: \$\{last\}/.test(setEditable));
     check('&debug=1 dumps composer state', /DEBUG innerHTML/.test(body('fillComposer')));
     check('debug flag is parsed from the URL',
       /params\.has\('debug'\)/.test(body('maybeRun')));
@@ -748,6 +786,13 @@ async function main() {
       /if \(isRichEditor\(target\)\) return false;/.test(setEditable));
     check('paste still gets raw text', /pasteText\(target, text\)/.test(setEditable));
     check('fill inserts the raw prompt', /fillInput\(el, prompt\)/.test(body('fillComposer')));
+    check('every insert waits for a verified-empty composer',
+      /if \(!emptyComposer\(target\) && !clearVerified\(target\)\) return false;/.test(setEditable),
+      'an insert can run against a non-empty composer, which duplicates text');
+    check('a failed attempt clears what it left behind',
+      /if \(!emptyComposer\(target\)\) clearVerified\(target\);/.test(setEditable));
+    check('fillInput never relies on selection alone to replace',
+      !/selectAllContents\(el\)/.test(body('fillInput')));
     check('params stripped only on success', /if \(!success\) return;/.test(body('maybeRun')));
 
     const sites = JSON.parse(JSON.stringify(vm.runInNewContext(
