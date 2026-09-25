@@ -112,7 +112,7 @@
     }
     if (!cfg) return { composer: DEFAULT_COMPOSER };
     if (cfg.gate && !location.pathname.startsWith(cfg.gate)) return null;
-    return { composer: [...(cfg.composer || []), ...DEFAULT_COMPOSER] };
+    return { composer: [...(cfg.composer || []), ...DEFAULT_COMPOSER], send: cfg.send || [] };
   }
 
   // Editor libraries nest the real contenteditable inside wrapper divs; typing
@@ -574,26 +574,41 @@
   }
 
   const SEND_NEG = /voice|dictate|attach|upload|stop|new[-_]?chat|share|rename|delete|artifact|download|copy|edit|tools|plus|add[-_]?file|microphone|camera|picker|search|upgrade|subscribe/i;
-  const SEND_POS = /send|submit|ask/i;
 
-  function findSendButton(input) {
-    const buttons = [...document.querySelectorAll('button, [role="button"]')]
-      .filter(b => !b.disabled && b.getAttribute('aria-disabled') !== 'true' && isVisible(b));
-    const meta = b => [b.getAttribute('aria-label') || '', b.getAttribute('title') || '',
-      b.getAttribute('data-testid') || '', (b.dataset && b.dataset.testid) || '', b.id || ''].join(' ');
-    const positive = b => {
-      const m = meta(b);
-      if (SEND_NEG.test(m)) return false;
-      return SEND_POS.test(m) || /\bsend\b/i.test(typeof b.className === 'string' ? b.className : '');
-    };
-    const isNear = b => {
+  // Tried when the provider has no known selector for its submit control.
+  const DEFAULT_SEND = [
+    'button[data-testid="send-button"]',
+    'button[data-testid*="send" i]',
+    'button[aria-label^="Send"]',
+  ];
+
+  function findSendButton(input, sendSelectors) {
+    const isNear = el => {
       if (!input) return true;
-      const r = b.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
       const ir = input.getBoundingClientRect();
       return Math.abs(r.top - ir.top) < 200 && Math.abs(r.left - ir.left) < 600;
     };
+
+    // Known-good selectors first, and only ones sitting next to the composer.
+    // Claude's control is a <span>, so a button query cannot find it at all.
+    for (const sel of [...(sendSelectors || []), ...DEFAULT_SEND]) {
+      for (const el of document.querySelectorAll(sel)) {
+        if (isVisible(el) && isNear(el)) return el;
+      }
+    }
+
+    const buttons = [...document.querySelectorAll('button, [role="button"]')]
+      .filter(b => !b.disabled && b.getAttribute('aria-disabled') !== 'true' && isVisible(b));
+    const meta = b => [b.getAttribute('aria-label') || '', b.getAttribute('title') || '',
+      b.getAttribute('data-testid') || '', (b.dataset && b.dataset.testid) || ''].join(' ');
+    const positive = b => {
+      const m = meta(b);
+      if (SEND_NEG.test(m)) return false;
+      return /send|submit/i.test(m);
+    };
     // Only reachable by scoping to the composer: the surrounding page is full
-    // of buttons that match /send|submit/ loosely enough to be dangerous.
+    // of controls that match loosely enough to be dangerous.
     const scope = input && (input.closest('form') || input.closest('rich-textarea')
       || input.closest('input-area-v2') || input.closest('div.textarea-wrapper')
       || input.closest('.search-input-and-toggle') || input.parentElement);
@@ -621,7 +636,8 @@
   // either filled and idle (manual mode) or filled and confirmed delivered
   // (auto-send mode) — and false if we gave up. The caller uses this to
   // decide whether it's safe to strip the URL params.
-  async function fillComposer(selectors, prompt, autoSend, debug) {
+  async function fillComposer(cfg, prompt, autoSend, debug) {
+    const selectors = cfg.composer;
     const norm = normalize(prompt);
     const startHref = location.href;
     const fillDeadline = Date.now() + 20000;
@@ -718,7 +734,7 @@
       if (st === 'lost') return lost();
       if (stillHas()) {
         const cur = findInput(selectors);
-        const btn = findSendButton(cur);
+        const btn = findSendButton(cur, cfg.send);
         if (btn) btn.click();
         else if (cur) pressEnter(cur);
       }
@@ -811,7 +827,7 @@
       ` | site: ${location.hostname}`);
 
     inFlight = true;
-    fillComposer(cfg.composer, prompt, autoSend, params.has('debug')).then(success => {
+    fillComposer(cfg, prompt, autoSend, params.has('debug')).then(success => {
       inFlight = false;
       if (!success) return;
       attempts = 0;

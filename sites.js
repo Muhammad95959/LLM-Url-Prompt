@@ -9,17 +9,29 @@
 //   base     - URL the composer page opens before appending ?prompt=
 //   gate     - path prefix, when the manifest match is broader than the chat page
 //   composer - ordered selectors, most specific first
+//   send     - ordered selectors for the submit control. Needed where the
+//              control is not a <button> (Claude uses a bare <span> with a
+//              click handler), which a button query will never match.
 (() => {
   globalThis.LLM_SITES = {
     'chatgpt.com': {
       label: 'ChatGPT',
       base: 'https://chatgpt.com/',
       composer: ['#prompt-textarea', 'main textarea', 'form textarea', 'textarea'],
+      send: ['button[data-testid="send-button"]', 'button[aria-label*="Send prompt"]'],
     },
     'claude.ai': {
       label: 'Claude',
       base: 'https://claude.ai/new',
       composer: ['div[contenteditable="true"]', '.ProseMirror', 'textarea'],
+      // The send control is a bare <span> with a click handler, so a query for
+      // buttons never finds it. Its position in the composer's toolbar row is
+      // stable; the React root id in front of it is not.
+      send: [
+        'span.inline-flex.min-w-0.items-center.gap-1 > span',
+        'span[class*="min-w-0"][class*="gap-1"] > span',
+        'div[class*="min-w-0"] > span:last-of-type',
+      ],
     },
     'gemini.google.com': {
       label: 'Gemini',

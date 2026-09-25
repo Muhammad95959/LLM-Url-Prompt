@@ -355,7 +355,7 @@ function makeEditor(d, { id, className = 'ProseMirror', ignorePaste = false,
 
 // --------------------------------------------------------- site scaffolding
 
-function buildSite(d, { hostname, search, editor, onSend }) {
+function buildSite(d, { hostname, search, editor, onSend, makeSend, decoys }) {
   const body = bind(new El('body'), d);
   d.body = body;
   doc.activeElement = null;
@@ -382,13 +382,29 @@ function buildSite(d, { hostname, search, editor, onSend }) {
     if (el && el._editor && !el._editor.ignoreSelectAll) el._selAll = true;
   };
 
-  const sendBtn = bind(new El('button'), d);
-  sendBtn.setAttribute('aria-label', 'Send prompt');
-  sendBtn.setAttribute('data-testid', 'send-button');
-  sendBtn.addEventListener('click', () => { if (onSend) onSend(d); });
-  if (editor) form.appendChild(sendBtn);
+  // Decoys sit next to the composer and would satisfy a loose heuristic.
+  const decoyHits = [];
+  for (const decoy of (decoys ? decoys(d) : [])) {
+    decoy.addEventListener('click', () => decoyHits.push(decoy.tagName));
+    form.appendChild(decoy);
+  }
 
-  return { doc: d, body, loc, editor };
+  // Default submit control is a real button; providers whose control is not a
+  // button supply their own via makeSend.
+  let sendCtrl;
+  if (makeSend) {
+    const made = makeSend(d);
+    sendCtrl = made.control || made;
+    for (const node of made.extra || [sendCtrl]) form.appendChild(node);
+  } else {
+    sendCtrl = bind(new El('button'), d);
+    sendCtrl.setAttribute('aria-label', 'Send prompt');
+    sendCtrl.setAttribute('data-testid', 'send-button');
+    form.appendChild(sendCtrl);
+  }
+  sendCtrl.addEventListener('click', () => { if (onSend) onSend(d); });
+
+  return { doc: d, body, loc, editor, sendCtrl, decoyHits };
 }
 
 // ------------------------------------------------------------- run the code
@@ -403,7 +419,10 @@ function runContent(opts = {}) {
     warn: (...a) => log.warn.push(a.join(' ')),
     error: (...a) => log.warn.push(a.join(' ')),
   };
-  const site = buildSite(d, { hostname: opts.hostname, search: opts.search, editor, onSend: opts.onSend });
+  const site = buildSite(d, {
+    hostname: opts.hostname, search: opts.search, editor, onSend: opts.onSend,
+    makeSend: opts.makeSend, decoys: opts.decoys,
+  });
   site.log = sink;
   site.warnings = log.warn;
   site.infos = log.info;
@@ -619,6 +638,61 @@ async function main() {
       same(run.editor._editor.lines, ['']), `composer = ${JSON.stringify(run.editor._editor.lines)}`);
     check('URL params stripped after a confirmed send', !run.loc.search,
       `search = ${run.loc.search}`);
+  }
+
+  // ---- 6b. Claude's submit control is a bare <span> in the toolbar row, not a
+  //           <button>. A decoy button sits next to it so a loose heuristic
+  //           would be caught clicking the wrong thing.
+  {
+    const prompt = 'Explain this:\n\nconst x = 1;\nWhy?';
+    const run = runContent({
+      hostname: 'claude.ai',
+      search: `?prompt=${encodeURIComponent(prompt)}&send=1`,
+      makeEditor: d => makeEditor(d, { id: 'composer' }),
+      makeSend: d => {
+        const row = bind(new El('span'), d);
+        row.className = 'inline-flex min-w-0 items-center gap-1';
+        const ctrl = bind(new El('span'), d);
+        row.appendChild(ctrl);
+        return { control: ctrl, extra: [row] };
+      },
+      decoys: d => {
+        const b = bind(new El('button'), d);
+        // The old heuristic matched a bare "send" word in the class name.
+        b.className = 'send-tooltip-button';
+        b.setAttribute('aria-label', 'Send to Cowork');
+        return [b];
+      },
+      onSend: sentTo('[data-message-author-role="user"]'),
+    });
+    await settle(2500);
+    const thread = run.body.querySelector('[data-message-author-role="user"]');
+    check('claude span control is found and clicked', !!thread,
+      'the message never reached the thread');
+    check('a decoy button is not clicked instead',
+      run.decoyHits.length === 0, `decoy clicks = ${JSON.stringify(run.decoyHits)}`);
+    check('params stripped after the real control was clicked', !run.loc.search,
+      `search = ${run.loc.search}`);
+  }
+
+  // ---- 6c. the submit control per provider comes from sites.js
+  {
+    const sites = JSON.parse(JSON.stringify(vm.runInNewContext(
+      `${read('sites.js')}; globalThis.LLM_SITES`, {})));
+    check('claude declares a span-based send selector',
+      Array.isArray(sites['claude.ai'].send)
+      && sites['claude.ai'].send.some(s => !s.startsWith('button')),
+      JSON.stringify(sites['claude.ai'].send));
+    check("claude's send selector is not tied to a React root id",
+      !sites['claude.ai'].send.some(s => /#[_a-z0-9]+_/.test(s)),
+      JSON.stringify(sites['claude.ai'].send));
+    check('chatgpt declares its send-button selector',
+      sites['chatgpt.com'].send.some(s => s.includes('send-button')),
+      JSON.stringify(sites['chatgpt.com'].send));
+    check('content.js threads cfg.send into findSendButton',
+      /findSendButton\(cur, cfg\.send\)/.test(body('fillComposer')));
+    check('the loose classname heuristic is gone',
+      !body('findSendButton').includes('className'));
   }
 
   // ---- 7. auto-send the site refuses: prompt kept, not lost
