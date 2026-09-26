@@ -18,7 +18,13 @@
       label: 'ChatGPT',
       base: 'https://chatgpt.com/',
       composer: ['#prompt-textarea', 'main textarea', 'form textarea', 'textarea'],
-      send: ['button[data-testid="send-button"]', 'button[aria-label*="Send prompt"]'],
+      // #composer-submit-button is the stable id; the others are fallbacks in
+      // case ChatGPT renames it back to a data-testid.
+      send: [
+        '#composer-submit-button',
+        'button[data-testid="send-button"]',
+        'button[aria-label*="Send prompt"]',
+      ],
     },
     'claude.ai': {
       label: 'Claude',

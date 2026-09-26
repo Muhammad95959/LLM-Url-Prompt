@@ -395,7 +395,8 @@ function buildSite(d, { hostname, search, editor, onSend, makeSend, decoys }) {
   if (makeSend) {
     const made = makeSend(d);
     sendCtrl = made.control || made;
-    for (const node of made.extra || [sendCtrl]) form.appendChild(node);
+    for (const node of made.extra || []) form.appendChild(node);
+    if (!sendCtrl.parent) form.appendChild(sendCtrl);
   } else {
     sendCtrl = bind(new El('button'), d);
     sendCtrl.setAttribute('aria-label', 'Send prompt');
@@ -686,13 +687,46 @@ async function main() {
     check("claude's send selector is not tied to a React root id",
       !sites['claude.ai'].send.some(s => /#[_a-z0-9]+_/.test(s)),
       JSON.stringify(sites['claude.ai'].send));
-    check('chatgpt declares its send-button selector',
+    check('chatgpt prefers #composer-submit-button',
+      sites['chatgpt.com'].send[0] === '#composer-submit-button',
+      JSON.stringify(sites['chatgpt.com'].send));
+    check('chatgpt keeps data-testid fallbacks',
       sites['chatgpt.com'].send.some(s => s.includes('send-button')),
       JSON.stringify(sites['chatgpt.com'].send));
     check('content.js threads cfg.send into findSendButton',
       /findSendButton\(cur, cfg\.send\)/.test(body('fillComposer')));
     check('the loose classname heuristic is gone',
       !body('findSendButton').includes('className'));
+  }
+
+  // ---- 6d. ChatGPT's control is #composer-submit-button. A decoy with a
+  //           send-ish testid sits next to it to prove the id wins.
+  {
+    const prompt = 'first line\nsecond line';
+    const run = runContent({
+      hostname: 'chatgpt.com',
+      search: `?prompt=${encodeURIComponent(prompt)}&send=1`,
+      makeEditor: d => makeEditor(d, { id: 'prompt-textarea' }),
+      makeSend: d => {
+        const ctrl = bind(new El('button'), d);
+        ctrl.id = 'composer-submit-button';
+        return { control: ctrl, extra: [] };
+      },
+      decoys: d => {
+        const b = bind(new El('button'), d);
+        b.setAttribute('data-testid', 'send-button-other');
+        b.setAttribute('aria-label', 'Send message to Cowork');
+        return [b];
+      },
+      onSend: sentTo('[data-message-author-role="user"]'),
+    });
+    await settle(2500);
+    check('chatgpt #composer-submit-button is clicked', !!run.body.querySelector('[data-message-author-role="user"]'),
+      'the message never reached the thread');
+    check('the chatgpt decoy is not clicked',
+      run.decoyHits.length === 0, `decoy clicks = ${JSON.stringify(run.decoyHits)}`);
+    check('params stripped after clicking #composer-submit-button', !run.loc.search,
+      `search = ${run.loc.search}`);
   }
 
   // ---- 7. auto-send the site refuses: prompt kept, not lost
