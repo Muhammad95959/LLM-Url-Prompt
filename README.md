@@ -116,7 +116,7 @@ composer page. To add a provider, add an entry there and its host to the
 `matches` list in `manifest.json`.
 
 ```sh
-node test.js          # 105 tests, no dependencies
+node test.js          # 160 tests, no dependencies
 ./test-providers.sh   # open each provider in your default browser
 ```
 

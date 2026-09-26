@@ -17,6 +17,12 @@ const read = f => fs.readFileSync(path.join(ROOT, f), 'utf8');
 
 let nodeSeq = 0;
 
+// Two canned positions. NEAR is the composer strip, FAR is elsewhere on the
+// page — which is what a document-wide selector can wrongly latch onto.
+const NEAR = { top: 0, left: 0, bottom: 40, right: 600, width: 600, height: 40 };
+const FAR = { top: 300, left: 4000, bottom: 340, right: 4600, width: 600, height: 40 };
+const place = (el, rect) => { el._rect = rect || FAR; return el; };
+
 class El {
   constructor(tag) {
     this.tagName = String(tag).toUpperCase();
@@ -107,7 +113,7 @@ class El {
   getClientRects() { return [{}]; }
   get offsetParent() { return null; }
   getBoundingClientRect() {
-    return { top: 0, left: 0, bottom: 40, right: 600, width: 600, height: 40 };
+    return this._rect || NEAR;
   }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   dispatchEvent(ev) {
@@ -385,7 +391,12 @@ function buildSite(d, { hostname, search, editor, onSend, makeSend, decoys }) {
   // Decoys sit next to the composer and would satisfy a loose heuristic.
   const decoyHits = [];
   for (const decoy of (decoys ? decoys(d) : [])) {
-    decoy.addEventListener('click', () => decoyHits.push(decoy.tagName));
+    // A decoy can be a whole subtree, so record clicks and position on every
+    // element in it — otherwise a click on a nested control goes unnoticed.
+    for (const node of [decoy, ...decoy.descendants()]) {
+      node.addEventListener('click', () => decoyHits.push(node.tagName));
+      if (!node._rect) node._rect = FAR;
+    }
     form.appendChild(decoy);
   }
 
@@ -727,6 +738,109 @@ async function main() {
       run.decoyHits.length === 0, `decoy clicks = ${JSON.stringify(run.decoyHits)}`);
     check('params stripped after clicking #composer-submit-button', !run.loc.search,
       `search = ${run.loc.search}`);
+  }
+
+  // ---- 6e. Gemini: send-button container, with a far-away decoy elsewhere on
+  //           the page that matches the same selector shape.
+  {
+    const prompt = 'line one\nline two';
+    const run = runContent({
+      hostname: 'gemini.google.com',
+      search: `?prompt=${encodeURIComponent(prompt)}&send=1`,
+      makeEditor: d => makeEditor(d, { className: 'single-line-format' }),
+      makeSend: d => {
+        const wrap = bind(new El('div'), d);
+        wrap.className = 'trailing-actions-wrapper';
+        const holder = bind(new El('div'), d);
+        holder.className = 'mat-mdc-tooltip-trigger send-button-container visible';
+        const icon = bind(new El('gem-icon-button'), d);
+        const ctrl = bind(new El('button'), d);
+        icon.appendChild(ctrl);
+        holder.appendChild(icon);
+        wrap.appendChild(holder);
+        return { control: ctrl, extra: [wrap] };
+      },
+      decoys: d => {
+        // Same shape, but rendered elsewhere in the page.
+        const wrap = bind(new El('div'), d);
+        const holder = bind(new El('div'), d);
+        holder.className = 'send-button-container';
+        const ctrl = bind(new El('button'), d);
+        holder.appendChild(ctrl);
+        wrap.appendChild(holder);
+        return [wrap];
+      },
+      onSend: sentTo('[data-message-author-role="user"]'),
+    });
+    await settle(2500);
+    check('gemini send-button-container is clicked',
+      !!run.body.querySelector('[data-message-author-role="user"]'),
+      'the message never reached the thread');
+    check('a same-shaped decoy elsewhere on the page is not clicked',
+      run.decoyHits.length === 0, `decoy clicks = ${JSON.stringify(run.decoyHits)}`);
+  }
+
+  // ---- 6f. Grok: the trailing-actions row inside the composer form.
+  {
+    const prompt = 'alpha\n    beta';
+    const run = runContent({
+      hostname: 'grok.com',
+      search: `?prompt=${encodeURIComponent(prompt)}&send=1`,
+      makeEditor: d => makeEditor(d, { className: 'plain-editor' }),
+      makeSend: d => {
+        const row = bind(new El('div'), d);
+        row.className = 'ms-auto shrink-0 flex flex-row items-end gap-1';
+        row._rect = NEAR;
+        const spacer = bind(new El('div'), d);
+        const second = bind(new El('div'), d);
+        const third = bind(new El('div'), d);
+        const ctrl = bind(new El('button'), d);
+        third.appendChild(ctrl);
+        row.appendChild(spacer); row.appendChild(second); row.appendChild(third);
+        return { control: ctrl, extra: [row] };
+      },
+      decoys: d => {
+        const b = bind(new El('button'), d);
+        b.setAttribute('aria-label', 'Subscribe to SuperGrok');
+        return [b];
+      },
+      onSend: sentTo('[data-message-author-role="user"]'),
+    });
+    await settle(2500);
+    check('grok trailing-actions send control is clicked',
+      !!run.body.querySelector('[data-message-author-role="user"]'),
+      'the message never reached the thread');
+    check('the grok decoy is not clicked',
+      run.decoyHits.length === 0, `decoy clicks = ${JSON.stringify(run.decoyHits)}`);
+  }
+
+  // ---- 6g. shipped selectors must not carry build-generated classes
+  {
+    const sites = JSON.parse(JSON.stringify(vm.runInNewContext(
+      `${read('sites.js')}; globalThis.LLM_SITES`, {})));
+    const generated = [
+      [/ng-tns-[\w-]+/, 'Angular build hash'],
+      [/mat-mdc-/, 'Material class'],
+      [/\.(visible|hidden|active|selected|inner|persistent-mic|with-model-picker)\b/, 'per-state class'],
+      [/\\\/@/, 'escaped Tailwind variant'],
+    ];
+    for (const [host, cfg] of Object.entries(sites)) {
+      for (const sel of cfg.send || []) {
+        for (const [re, why] of generated) {
+          check(`${host} send selector avoids ${why}: ${sel}`, !re.test(sel));
+        }
+      }
+    }
+    check('gemini prefers the send-button container',
+      sites['gemini.google.com'].send[0] === 'div.send-button-container button',
+      JSON.stringify(sites['gemini.google.com'].send));
+    check('grok scopes its send selector to the composer form',
+      sites['grok.com'].send.every(s => s.startsWith('form ')),
+      JSON.stringify(sites['grok.com'].send));
+    check('grok has fallbacks past the positional selector',
+      sites['grok.com'].send.length >= 2
+      && !sites['grok.com'].send.every(s => s.includes('nth-child')),
+      JSON.stringify(sites['grok.com'].send));
   }
 
   // ---- 7. auto-send the site refuses: prompt kept, not lost

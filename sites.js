@@ -50,8 +50,28 @@
         '#xap-skip-link-target chat-window input-area-v2 div.single-line-format > div',
         'div[contenteditable="true"]', 'rich-textarea', 'textarea',
       ],
+      // Only the stable part of the control's chain. Its full ancestry carries
+      // ng-tns-<build-hash> and mat-mdc-* classes plus per-state ones
+      // (visible, persistent-mic, with-model-picker), all of which change
+      // between builds; the send-button container's own class does not.
+      send: [
+        'div.send-button-container button',
+        'gem-icon-button button',
+        'div.trailing-actions-wrapper button',
+      ],
     },
-    'grok.com': { label: 'Grok', base: 'https://grok.com/' },
+    'grok.com': {
+      label: 'Grok',
+      base: 'https://grok.com/',
+      // The composer is a <form> and its send control is the third child of the
+      // trailing-actions row. nth-child is positional, so the last-child and
+      // any-in-row forms follow it in case the row gains or loses a control.
+      send: [
+        'form div.ms-auto.shrink-0 > div:nth-child(3) > button',
+        'form div.ms-auto.shrink-0 > div:last-child > button',
+        'form div.ms-auto.shrink-0 button',
+      ],
+    },
     'perplexity.ai': {
       label: 'Perplexity',
       base: 'https://perplexity.ai/',
