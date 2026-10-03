@@ -9,9 +9,12 @@
 
    Guard
      The prompt is recorded in localStorage under a hash of
-     `<text>|<send>`. Once consumed, revisiting the same URL is a no-op.
-     When the app navigates to a conversation URL the entry is stamped with
-     that chat id. Entries expire after STORE_TTL_MS. */
+     `<text>|<send>`. A prompt counts as used only once the app created a
+     conversation for it: the entry is stamped with that chat id, and only a
+     stamped entry blocks later visits. Until then the claim is provisional —
+     it only stops the 250ms poll loop and an immediate second open from firing
+     a duplicate, and lapses on its own. Fill-only runs release their claim
+     outright. Entries expire after STORE_TTL_MS. */
 
 const TAG = '[llm-url-prompt]';
 const PROMPT_PARAMS = ['prompt', 'q'];
@@ -21,6 +24,9 @@ const STORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const INPUT_TIMEOUT_MS = 25000;
 const SEND_TIMEOUT_MS = 8000;
 const CHAT_ID_TIMEOUT_MS = 120000;
+// Provisional claims block re-entry for as long as a chat id could still
+// arrive, plus a grace window for slow navigations.
+const CLAIM_TTL_MS = CHAT_ID_TIMEOUT_MS + 30000;
 const TRUTHY = /^(1|true|yes|on|send|submit)$/i;
 
 const site = LLM.matchSite(location.hostname);
@@ -75,10 +81,17 @@ function forget(key) {
   }
 }
 
-function wasConsumed(key) {
+/* Only a chat id makes a prompt "used". An unstamped claim is provisional: it
+   exists to stop the poll loop and an immediate re-open from double-firing,
+   and stops counting as a block once CLAIM_TTL_MS has passed. */
+function claimState(key) {
   const entry = readStore()[key];
-  if (!entry) return false;
-  return Date.now() - (entry.ts || 0) < STORE_TTL_MS;
+  if (!entry) return null;
+  const age = Date.now() - (entry.ts || 0);
+  if (age >= STORE_TTL_MS) return null;
+  if (entry.chatId) return 'done';
+  if (entry.inflight && age < CLAIM_TTL_MS) return 'inflight';
+  return null;
 }
 
 /* ---------------- url ---------------- */
@@ -200,20 +213,25 @@ async function run({ prompt, send }, key, originPath) {
   console.log(TAG, 'filled', site.id, { send, length: prompt.length });
   toast(send ? `Prompt filled — sending to ${site.label}…` : `Prompt filled in ${site.label}. Not sent.`, send ? undefined : 'warn');
 
-  if (send) {
-    await sleep(site.postFillDelay);
-    // Re-resolve: every one of these apps remounts the composer.
-    const live = findInput() || input;
-    if (!LLM.elText(live)) LLM.fill(live, prompt);
+  if (!send) {
+    // Nothing was sent, so there is nothing to remember: drop the claim and
+    // let a later visit with the same URL fill again.
+    forget(key);
+    return;
+  }
 
-    const btn = await LLM.waitFor(() => findSend(live), SEND_TIMEOUT_MS, 200);
-    if (btn) {
-      LLM.clickSend(btn);
-      console.log(TAG, 'clicked send', site.id, btn.getAttribute('data-testid') || btn.className || btn.tagName);
-    } else {
-      console.warn(TAG, 'no enabled send button — falling back to Enter');
-      LLM.pressEnter(live);
-    }
+  await sleep(site.postFillDelay);
+  // Re-resolve: every one of these apps remounts the composer.
+  const live = findInput() || input;
+  if (!LLM.elText(live)) LLM.fill(live, prompt);
+
+  const btn = await LLM.waitFor(() => findSend(live), SEND_TIMEOUT_MS, 200);
+  if (btn) {
+    LLM.clickSend(btn);
+    console.log(TAG, 'clicked send', site.id, btn.getAttribute('data-testid') || btn.className || btn.tagName);
+  } else {
+    console.warn(TAG, 'no enabled send button — falling back to Enter');
+    LLM.pressEnter(live);
   }
 
   watchForChatId(key, originPath);
@@ -224,7 +242,7 @@ function watchForChatId(key, originPath) {
   const id = setInterval(() => {
     const path = location.pathname;
     if (site.conversationPath.test(path) && path !== originPath) {
-      markConsumed(key, { chatId: path });
+      markConsumed(key, { chatId: path, inflight: false });
       clearInterval(id);
       console.log(TAG, 'recorded chat id', path);
     } else if (Date.now() > deadline) {
@@ -241,14 +259,22 @@ function handle() {
   const key = hashKey(params.prompt + '|' + (params.send ? 1 : 0));
   const originPath = location.pathname;
 
-  if (wasConsumed(key)) {
-    toast(`This ${site.label} prompt was already used — parameters cleared.`, 'warn');
-    console.log(TAG, 'already consumed, ignoring', key, readStore()[key]);
+  const state = claimState(key);
+  if (state) {
+    const entry = readStore()[key] || {};
+    toast(
+      state === 'done'
+        ? `This ${site.label} prompt is already a chat (${entry.chatId}) — parameters cleared.`
+        : `This ${site.label} prompt is already being handled — parameters cleared.`,
+      'warn',
+    );
+    console.log(TAG, 'already handled, ignoring', state, key, entry);
     return;
   }
 
-  // Claim before acting so the poll loop cannot start a second run.
-  markConsumed(key, { chatId: null, from: originPath });
+  // Claim before acting so neither the poll loop nor an immediate second open
+  // can start a duplicate run. Provisional until a chat id is stamped.
+  markConsumed(key, { inflight: true, chatId: null, from: originPath });
   run(params, key, originPath).catch((err) => {
     forget(key);
     console.error(TAG, err);

@@ -26,8 +26,9 @@ Firefox: `about:debugging#/runtime/this-firefox` → "Load Temporary Add-on" →
 ### Already-used guard
 
 - The parameters are stripped from the address bar immediately (via `history.replaceState`), so the prompt is never left sitting in the URL, history, or a shared link.
-- Before acting, the entry `hash(prompt | send)` is claimed in `localStorage` under `llm-url-prompt/consumed/v1`. Re-opening the same URL is a no-op — the extension just shows a toast and clears the parameters.
-- Once the app navigates to a conversation URL (`/c/<id>`, `/app/<id>`, `/chat/<id>`, `/a/chat/s/<id>`), the entry is stamped with that chat id.
+- Before acting, the entry `hash(prompt | send)` is claimed in `localStorage` under `llm-url-prompt/consumed/v1`. That claim is **provisional** — it only stops the 250ms poll loop and an immediate second open from firing a duplicate, and it lapses on its own after ~2.5 minutes.
+- A prompt counts as **used** only once the app creates the conversation for it: the entry is then stamped with that chat id (`/c/<id>`, `/app/<id>`, `/chat/<id>`, `/a/chat/s/<id>`), and only a stamped entry blocks later visits. A send that never navigates is not remembered, so a revisit retries it.
+- Fill-only runs release their claim outright — nothing was sent, so there is nothing to deduplicate.
 - Entries expire after 7 days. If the composer could not be found or filled, the claim is rolled back so a revisit retries.
 
 To reset manually, run in the site console:
@@ -70,6 +71,17 @@ Everything is re-resolved on every attempt — these apps unmount and remount th
 | DeepSeek | `textarea[name="search"]` | `.ds-icon-button` / `div[role="button"]` | the send control is a `div`, not a `<button>`, and sits next to the textarea |
 
 Submitting always prefers clicking the real send button (or `form.requestSubmit()` for `type="submit"` composers) and only falls back to a synthetic `Enter` keypress.
+
+## Testing
+
+```bash
+./test-all.sh "what is a monad"                 # all four providers, fill + send
+./test-all.sh "what is a monad" gemini claude   # subset
+./test-all.sh "what is a monad" --exact         # send the text verbatim
+./test-all.sh "what is a monad" --no-open       # just print the URLs
+```
+
+Each run appends a `[test <time>-<pid>` tag to the prompt so the consumed-guard cannot swallow a retest of identical wording (`--exact` opts out). Launcher order: `--browser`, then `brave-browser`, `brave`, `$BROWSER`, `xdg-open`.
 
 ## Debugging
 
