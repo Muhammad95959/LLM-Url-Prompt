@@ -41,13 +41,22 @@ var LLM = (function () {
 
   // Every site marks "cannot send yet" differently: real [disabled],
   // aria-disabled, a rotating `disabled` class, or data-visually-disabled.
+  // The class heuristic is deliberately limited to elements with no native
+  // disabled state — Claude's enabled send button carries a class with
+  // "disabled" in it (verified in a live dump: testid=chat-input-send,
+  // disabled=false), so trusting the class on a real <button> vetoes a control
+  // that is actually ready.
   function isDisabled(el) {
     if (!el) return true;
     if (el.disabled === true) return true;
     if (el.getAttribute('aria-disabled') === 'true') return true;
     if (el.hasAttribute('data-visually-disabled')) return true;
-    if (typeof el.className === 'string' && /(^|\s|-)disabled(\s|-|$)/.test(el.className)) return true;
+    if (!hasNativeDisabled(el) && typeof el.className === 'string' && /(^|\s|-)disabled(\s|-|$)/.test(el.className)) return true;
     return !isVisible(el);
+  }
+
+  function hasNativeDisabled(el) {
+    return typeof el.disabled === 'boolean' && el.matches('button, input, select, textarea, fieldset, optgroup, option');
   }
 
   function waitFor(fn, timeout, interval) {
@@ -173,8 +182,11 @@ var LLM = (function () {
     ];
   }
 
-  function fill(el, text) {
-    for (const strategy of fillStrategies(text)) {
+  // `opts.start` skips strategies already tried, so a caller can retry with the
+  // next one — needed when a strategy renders the text without the app's state
+  // ever seeing it.
+  function fill(el, text, opts) {
+    for (const strategy of fillStrategies(text).slice((opts && opts.start) || 0)) {
       try {
         strategy(el);
       } catch (_) {
@@ -193,11 +205,61 @@ var LLM = (function () {
     return out;
   }
 
+  // Vendor test ids rotate between builds ("send-button" → something else), but
+  // the accessible name and the control's position in the composer's footer do
+  // not. Name match first, then the nearest anonymous control.
+  const SEND_NAME = /send|submit|发送|送信|發送/i;
+  const NOT_SEND = /mic|voice|attach|upload|file|image|camera|search|setting|menu|model|think|tool|dictat|audio|video|share|copy|regenerate|stop|new chat/i;
+  let warnedNoSend = false;
+
+  function accessibleName(el) {
+    return [el.getAttribute('aria-label'), el.getAttribute('title'), el.textContent].filter(Boolean).join(' ').trim();
+  }
+
+  // Last resort when every selector in `sends` missed: look inside the
+  // composer's own footer. Geometry is bounded to the bottom-right corner so the
+  // mic / attachment / model-picker controls next to it are not candidates.
+  function nearbySend(input) {
+    if (!input) return null;
+    const anchor = input.getBoundingClientRect();
+    const pool = collect(['button', '[role="button"]']).filter((el) => {
+      if (el === input || input.contains(el) || el.contains(input)) return false;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return false;
+      if (isDisabled(el)) return false;
+      return r.bottom > anchor.bottom - 48 && r.top < anchor.bottom + 80 && r.right > anchor.right - 200;
+    });
+    if (!pool.length) return null;
+
+    const score = (el) => {
+      const r = el.getBoundingClientRect();
+      return Math.abs(r.bottom - anchor.bottom) + Math.abs(r.right - anchor.right) * 0.4;
+    };
+    pool.sort((a, b) => score(a) - score(b));
+
+    const named = pool.find((el) => {
+      const name = accessibleName(el);
+      return SEND_NAME.test(name) && !NOT_SEND.test(name);
+    });
+    if (named) return named;
+
+    const anonymous = pool.find((el) => !accessibleName(el) && !NOT_SEND.test(el.className || ''));
+    if (anonymous) return anonymous;
+
+    // Reached once per findSend() poll, so keep it out of the error console and
+    // say it only once per page load.
+    if (!warnedNoSend) {
+      warnedNoSend = true;
+      console.log('[llm-url-prompt] no send control in the composer footer, only:', pool.map((el) => `${el.tagName}[${accessibleName(el) || el.className || '?'}]`).join(', '));
+    }
+    return null;
+  }
+
   // Prefers the send button nearest the composer; DeepSeek's is a generic
   // div[role=button] and needs geometry to disambiguate.
   function pickSend(selectors, input) {
     const enabled = collect(selectors).filter((el) => !isDisabled(el));
-    if (!enabled.length) return null;
+    if (!enabled.length) return nearbySend(input);
     if (!input) return enabled[0];
 
     const anchor = input.getBoundingClientRect();
@@ -235,15 +297,6 @@ var LLM = (function () {
     } catch (_) {
       return false;
     }
-  }
-
-  function pressEnter(el) {
-    if (!el) return;
-    const opts = { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13, charCode: 13 };
-    el.focus();
-    el.dispatchEvent(new KeyboardEvent('keydown', opts));
-    el.dispatchEvent(new KeyboardEvent('keypress', opts));
-    el.dispatchEvent(new KeyboardEvent('keyup', opts));
   }
 
   /* ---------------- adapters ---------------- */
@@ -360,6 +413,30 @@ var LLM = (function () {
     );
   }
 
+  // Wider diagnostics: every control near the composer with all four
+  // disabled-marker values plus geometry, for when sending fails.
+  function describeComposerControls(input) {
+    if (!input) return 'no composer';
+    const a = input.getBoundingClientRect();
+    return collect(['button', '[role="button"]', '[role="menuitem"]'])
+      .filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width && r.height && r.bottom > a.top - 20 && r.top < a.bottom + 120;
+      })
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        const cls = typeof el.className === 'string' ? el.className : '';
+        return (
+          `${el.tagName}[${el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent.trim().slice(0, 24) || cls.slice(0, 32)}] ` +
+          `testid=${el.getAttribute('data-testid') || el.getAttribute('data-test-id') || '-'} ` +
+          `disabled=${el.disabled === true} ariaDisabled=${el.getAttribute('aria-disabled')} ` +
+          `visualDisabled=${el.hasAttribute('data-visually-disabled')} disabledClass=${/(^|\s|-)disabled(\s|-|$)/.test(cls)} ` +
+          `at(${Math.round(r.left)},${Math.round(r.top)})`
+        );
+      })
+      .join(' | ');
+  }
+
   return {
     sites,
     matchSite,
@@ -373,7 +450,7 @@ var LLM = (function () {
     pickSend,
     collect,
     clickSend,
-    pressEnter,
     nativeValue,
+    describeComposerControls,
   };
 })();

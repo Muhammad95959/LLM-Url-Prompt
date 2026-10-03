@@ -8,41 +8,42 @@
      ?q=<text>               alias of ?prompt
 
    Guard
-     The prompt is recorded in localStorage under a hash of
-     `<text>|<send>`. A prompt counts as used only once the app created a
-     conversation for it: the entry is stamped with that chat id, and only a
-     stamped entry blocks later visits. Until then the claim is provisional —
-     it only stops the 250ms poll loop and an immediate second open from firing
-     a duplicate, and lapses on its own. Fill-only runs release their claim
-     outright. Entries expire after STORE_TTL_MS. */
+     Nothing derived from the prompt text is ever stored. The only durable
+     record is the conversation path the app navigated to after a send, saved
+     under a key of the chat id itself (`<conversationPath> -> ts`).
+
+     Repeat-fire protection is therefore two-layered:
+       1. in-memory, per document: the params are stripped immediately, and a
+          prompt handled in this page load is never handled again.
+       2. durable, chat-id only: if prompt params reappear while sitting on a
+          conversation we already sent into, the run is skipped.
+
+     A fill-only run records nothing. A send that never navigates records
+     nothing, so it is retried on the next visit. Chat records expire after
+     STORE_TTL_MS. */
 
 const TAG = '[llm-url-prompt]';
 const PROMPT_PARAMS = ['prompt', 'q'];
 const SEND_PARAMS = ['send', 'autosubmit', 'submit'];
-const STORE_KEY = 'llm-url-prompt/consumed/v1';
+const STORE_KEY = 'llm-url-prompt/sent-chats/v1';
 const STORE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const INPUT_TIMEOUT_MS = 25000;
 const SEND_TIMEOUT_MS = 8000;
 const CHAT_ID_TIMEOUT_MS = 120000;
-// Provisional claims block re-entry for as long as a chat id could still
-// arrive, plus a grace window for slow navigations.
-const CLAIM_TTL_MS = CHAT_ID_TIMEOUT_MS + 30000;
+// How long one handled prompt stays blocked inside this page load.
+const HANDLED_TTL_MS = 10 * 60 * 1000;
 const TRUTHY = /^(1|true|yes|on|send|submit)$/i;
 
 const site = LLM.matchSite(location.hostname);
 
 /* ---------------- storage ---------------- */
 
-function hashKey(str) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(36);
-}
+// Deliberately in memory only — keyed by nothing, never persisted, gone on
+// reload. Its only job is to stop the 250ms poll loop and a second
+// history.replaceState from running the same prompt twice in one page load.
+const handled = new Map();
 
-function readStore() {
+function readChats() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return {};
@@ -53,45 +54,44 @@ function readStore() {
   }
 }
 
-function writeStore(store) {
+function writeChats(chats) {
   try {
     const now = Date.now();
     const kept = {};
-    for (const [k, v] of Object.entries(store)) {
-      if (now - (v && v.ts ? v.ts : 0) < STORE_TTL_MS) kept[k] = v;
+    for (const [path, ts] of Object.entries(chats)) {
+      if (now - (ts || 0) < STORE_TTL_MS) kept[path] = ts;
     }
     localStorage.setItem(STORE_KEY, JSON.stringify(kept));
   } catch (_) {
-    /* private mode / storage blocked — the in-memory guard still holds */
+    /* private mode / storage blocked */
   }
 }
 
-function markConsumed(key, patch) {
-  const store = readStore();
-  store[key] = Object.assign({ ts: Date.now() }, store[key], patch);
-  writeStore(store);
-  return store[key];
+function knownChat(path) {
+  const chats = readChats();
+  const ts = chats[path];
+  return ts ? Date.now() - ts < STORE_TTL_MS : false;
 }
 
-function forget(key) {
-  const store = readStore();
-  if (store[key]) {
-    delete store[key];
-    writeStore(store);
-  }
+function rememberChat(path) {
+  const chats = readChats();
+  chats[path] = Date.now();
+  writeChats(chats);
 }
 
-/* Only a chat id makes a prompt "used". An unstamped claim is provisional: it
-   exists to stop the poll loop and an immediate re-open from double-firing,
-   and stops counting as a block once CLAIM_TTL_MS has passed. */
-function claimState(key) {
-  const entry = readStore()[key];
-  if (!entry) return null;
-  const age = Date.now() - (entry.ts || 0);
-  if (age >= STORE_TTL_MS) return null;
-  if (entry.chatId) return 'done';
-  if (entry.inflight && age < CLAIM_TTL_MS) return 'inflight';
-  return null;
+function alreadyHandled(prompt, send) {
+  const key = `${prompt}|${send ? 1 : 0}`;
+  const at = handled.get(key);
+  return at != null && Date.now() - at < HANDLED_TTL_MS;
+}
+
+function markHandled(prompt, send) {
+  handled.set(`${prompt}|${send ? 1 : 0}`, Date.now());
+  if (handled.size > 20) handled.delete(handled.keys().next().value);
+}
+
+function releaseHandled(prompt, send) {
+  handled.delete(`${prompt}|${send ? 1 : 0}`);
 }
 
 /* ---------------- url ---------------- */
@@ -191,10 +191,56 @@ function findSend(input) {
 
 /* ---------------- main flow ---------------- */
 
-async function run({ prompt, send }, key, originPath) {
+const POST_FILL_ATTEMPTS = 3;
+const POST_FILL_BACKOFF_MS = [150, 400];
+
+// These apps remount the composer on navigation and right after a send, and
+// DeepSeek's /a/chat landing URL redirects under us, which silently discards
+// whatever we filled. So re-resolve and re-fill until the text survives
+// instead of trusting one postFillDelay sleep.
+async function ensureFilled(prompt) {
+  for (let attempt = 0; attempt < POST_FILL_ATTEMPTS; attempt++) {
+    await sleep(attempt === 0 ? site.postFillDelay : POST_FILL_BACKOFF_MS[attempt - 1]);
+    const live = findInput();
+    if (!live) continue;
+    if (!LLM.elText(live)) LLM.fill(live, prompt);
+    if (LLM.elText(live)) return live;
+    console.warn(TAG, 'composer was empty again after fill, attempt', attempt + 1);
+  }
+  return null;
+}
+
+// A composer can hold the text visually while the app's own state never saw it
+// — a ProseMirror paste React ignores leaves the send control disabled forever.
+// So a dead send path is treated as a fill failure: re-fill with the next
+// strategy and look again before falling back to Enter.
+const SEND_ROUNDS = 2;
+
+async function clickSend(input, prompt) {
+  let live = input;
+  for (let round = 0; round < SEND_ROUNDS; round++) {
+    const timeout = round === 0 ? SEND_TIMEOUT_MS : 3000;
+    const btn = await LLM.waitFor(() => findSend(live), timeout, 200);
+    if (btn) {
+      LLM.clickSend(btn);
+      console.log(TAG, 'clicked send', site.id, accessible(btn));
+      return true;
+    }
+    live = findInput() || live;
+    if (!LLM.elText(live)) {
+      console.warn(TAG, 'composer is empty again — giving up on send');
+      return false;
+    }
+    console.log(TAG, 'no enabled send control after fill — re-filling with strategy', round + 2);
+    LLM.fill(live, prompt, { start: round + 1 });
+  }
+  return false;
+}
+
+async function run({ prompt, send }) {
   const input = await LLM.waitFor(findInput, INPUT_TIMEOUT_MS, 250);
   if (!input) {
-    forget(key);
+    releaseHandled(prompt, send);
     toast(`Could not find the ${site.label} prompt box — parameter ignored.`, 'error');
     console.warn(TAG, `no input found within ${INPUT_TIMEOUT_MS}ms`);
     return;
@@ -204,7 +250,7 @@ async function run({ prompt, send }, key, originPath) {
 
   const landed = LLM.fill(input, prompt);
   if (!landed) {
-    forget(key);
+    releaseHandled(prompt, send);
     toast(`Could not fill the ${site.label} prompt box — parameter ignored.`, 'error');
     console.warn(TAG, 'fill failed', input);
     return;
@@ -214,39 +260,61 @@ async function run({ prompt, send }, key, originPath) {
   toast(send ? `Prompt filled — sending to ${site.label}…` : `Prompt filled in ${site.label}. Not sent.`, send ? undefined : 'warn');
 
   if (!send) {
-    // Nothing was sent, so there is nothing to remember: drop the claim and
+    // Nothing was sent, so there is nothing to remember: release the claim and
     // let a later visit with the same URL fill again.
-    forget(key);
+    releaseHandled(prompt, send);
     return;
   }
 
-  await sleep(site.postFillDelay);
-  // Re-resolve: every one of these apps remounts the composer.
-  const live = findInput() || input;
-  if (!LLM.elText(live)) LLM.fill(live, prompt);
-
-  const btn = await LLM.waitFor(() => findSend(live), SEND_TIMEOUT_MS, 200);
-  if (btn) {
-    LLM.clickSend(btn);
-    console.log(TAG, 'clicked send', site.id, btn.getAttribute('data-testid') || btn.className || btn.tagName);
-  } else {
-    console.warn(TAG, 'no enabled send button — falling back to Enter');
-    LLM.pressEnter(live);
+  const live = await ensureFilled(prompt);
+  if (!live) {
+    releaseHandled(prompt, send);
+    toast(`The ${site.label} prompt box kept losing the text — nothing sent.`, 'error');
+    console.log(TAG, 'composer controls nearby:', LLM.describeComposerControls(input));
+    return;
   }
 
-  watchForChatId(key, originPath);
+  if (!(await clickSend(live, prompt))) {
+    releaseHandled(prompt, send);
+    toast(`No enabled ${site.label} send button — prompt left in the box, not sent.`, 'error');
+    console.warn(TAG, `no enabled send control after ${SEND_ROUNDS} rounds — not sending. Nearby controls → ${LLM.describeComposerControls(live)}`);
+    return;
+  }
+
+  recordChatId(prompt, send);
 }
 
-function watchForChatId(key, originPath) {
+function accessible(el) {
+  return el.getAttribute('data-testid') || el.getAttribute('data-test-id') || el.getAttribute('aria-label') || el.className || el.tagName;
+}
+
+// The send is only "recorded" once the app has actually created the
+// conversation, and the only thing stored is that path. Two shapes are both
+// recorded: a send that happens while *already on* a conversation URL (the
+// path is identical to origin), and a send from a new-chat URL that navigates
+// into /c/<id>, /app/<id>, etc.
+function recordChatId(prompt, send) {
+  const tryRecord = () => {
+    const path = location.pathname;
+    if (!site.conversationPath.test(path)) return false;
+    rememberChat(path);
+    releaseHandled(prompt, send);
+    console.log(TAG, 'sent, chat id saved', path);
+    return true;
+  };
+
+  if (tryRecord()) return;
+
   const deadline = Date.now() + CHAT_ID_TIMEOUT_MS;
   const id = setInterval(() => {
-    const path = location.pathname;
-    if (site.conversationPath.test(path) && path !== originPath) {
-      markConsumed(key, { chatId: path, inflight: false });
+    if (tryRecord()) {
       clearInterval(id);
-      console.log(TAG, 'recorded chat id', path);
-    } else if (Date.now() > deadline) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      releaseHandled(prompt, send);
       clearInterval(id);
+      console.log(TAG, 'no conversation id appeared — nothing saved, a revisit will retry');
     }
   }, 400);
 }
@@ -256,27 +324,25 @@ function handle() {
   if (!params) return;
   stripParams();
 
-  const key = hashKey(params.prompt + '|' + (params.send ? 1 : 0));
-  const originPath = location.pathname;
+  const { prompt, send } = params;
 
-  const state = claimState(key);
-  if (state) {
-    const entry = readStore()[key] || {};
-    toast(
-      state === 'done'
-        ? `This ${site.label} prompt is already a chat (${entry.chatId}) — parameters cleared.`
-        : `This ${site.label} prompt is already being handled — parameters cleared.`,
-      'warn',
-    );
-    console.log(TAG, 'already handled, ignoring', state, key, entry);
+  if (alreadyHandled(prompt, send)) {
+    toast(`This ${site.label} prompt was already handled on this page — parameters cleared.`, 'warn');
+    console.log(TAG, 'already handled in this page load, ignoring');
     return;
   }
 
-  // Claim before acting so neither the poll loop nor an immediate second open
-  // can start a duplicate run. Provisional until a chat id is stamped.
-  markConsumed(key, { inflight: true, chatId: null, from: originPath });
-  run(params, key, originPath).catch((err) => {
-    forget(key);
+  // Durable guard, keyed by chat id alone: prompt params showing up inside a
+  // conversation we already sent into means this would duplicate a send.
+  if (knownChat(location.pathname)) {
+    toast(`This ${site.label} conversation (${location.pathname}) already has a sent prompt — parameters cleared.`, 'warn');
+    console.log(TAG, 'current chat was already sent into, ignoring', location.pathname);
+    return;
+  }
+
+  markHandled(prompt, send);
+  run(params).catch((err) => {
+    releaseHandled(prompt, send);
     console.error(TAG, err);
   });
 }
